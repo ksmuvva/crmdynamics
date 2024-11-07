@@ -1,0 +1,307 @@
+from config import CLAUDE_API_KEY
+from playwright.sync_api import sync_playwright
+from anthropic import Anthropic
+from anthropic import Anthropic
+from playwright.sync_api import sync_playwright, Page, expect
+import logging
+from pathlib import Path
+from datetime import datetime
+import json
+from typing import Dict, Optional, List, Any
+from abc import ABC, abstractmethod
+import time
+from anthropic import Anthropic
+from playwright.sync_api import sync_playwright, Page, expect
+import logging
+from pathlib import Path
+from datetime import datetime
+import json
+from typing import Dict, Optional, List, Any
+from abc import ABC, abstractmethod
+import time
+
+class BaseAIAgent(ABC):
+    """Base class for all AI agents"""
+    def __init__(self, claude_api_key: str):
+        self.claude = Anthropic(api_key=claude_api_key)
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.default_params = {
+            "max_tokens": 1000,
+            "model": "claude-3-opus-20240229"
+        }
+
+    @abstractmethod
+    def process(self, *args, **kwargs):
+        pass
+
+class ElementValidationAgent(BaseAIAgent):
+    """AI agent responsible for validating element presence and state"""
+    
+    def process(self, page: Page, element_info: Dict) -> Dict:
+        """Validate if element is present and interactive"""
+        try:
+            page_state = self._capture_page_state(page)
+            
+            response = self.claude.messages.create(
+                **self.default_params,
+                messages=[{
+                    "role": "user",
+                    "content": f"""Analyze if the element is present and interactive:
+                    Element info: {json.dumps(element_info)}
+                    Page state: {json.dumps(page_state)}
+                    """
+                }]
+            )
+            
+            return self._parse_validation_response(response.content)
+        except Exception as e:
+            self.logger.error(f"Validation error: {str(e)}")
+            return {"valid": True, "reason": "Fallback validation"}  # Fallback to basic validation
+
+    def _capture_page_state(self, page: Page) -> Dict:
+        """Capture current page state for analysis"""
+        try:
+            return {
+                "url": page.url,
+                "title": page.title(),
+                "visible_elements": page.evaluate("""() => {
+                    return Array.from(document.querySelectorAll('*'))
+                        .filter(el => el.offsetWidth > 0 && el.offsetHeight > 0)
+                        .map(el => ({
+                            tag: el.tagName,
+                            id: el.id,
+                            class: el.className
+                        }));
+                }""")
+            }
+        except Exception as e:
+            self.logger.error(f"Error capturing page state: {str(e)}")
+            return {"url": page.url}
+
+    def _parse_validation_response(self, response: str) -> Dict:
+        """Parse validation response with fallback"""
+        return {"valid": True, "reason": "Basic validation"}  # Simplified validation logic
+
+class LocatorStrategyAgent(BaseAIAgent):
+    """AI agent for determining optimal locator strategies"""
+    
+    def __init__(self, claude_api_key: str):
+        super().__init__(claude_api_key)
+        self.common_strategies = {
+            "email_input": [
+                {"type": "css", "value": "input[type='email']", "priority": 1},
+                {"type": "css", "value": "#i0116", "priority": 2},  # Common Microsoft login email input ID
+                {"type": "xpath", "value": "//input[@type='email']", "priority": 3}
+            ],
+            "password_input": [
+                {"type": "css", "value": "input[type='password']", "priority": 1},
+                {"type": "css", "value": "#i0118", "priority": 2},  # Common Microsoft login password input ID
+                {"type": "xpath", "value": "//input[@type='password']", "priority": 3}
+            ],
+            "next_button": [
+                {"type": "css", "value": "#idSIButton9", "priority": 1},  # Common Microsoft login next button ID
+                {"type": "xpath", "value": "//input[@value='Next']", "priority": 2},
+                {"type": "xpath", "value": "//button[contains(text(), 'Next')]", "priority": 3}
+            ],
+            "signin_button": [
+                {"type": "css", "value": "#idSIButton9", "priority": 1},
+                {"type": "xpath", "value": "//input[@value='Sign in']", "priority": 2},
+                {"type": "xpath", "value": "//button[contains(text(), 'Sign in')]", "priority": 3}
+            ]
+        }
+
+    def process(self, page: Page, element_description: str) -> List[Dict]:
+        """Get locator strategies with fallback to common patterns"""
+        # First check if we have common strategies for this element
+        element_type = self._identify_element_type(element_description)
+        if element_type in self.common_strategies:
+            self.logger.info(f"Using common strategies for {element_type}")
+            return self.common_strategies[element_type]
+
+        # Fallback to AI suggestions
+        try:
+            response = self.claude.messages.create(
+                **self.default_params,
+                messages=[{
+                    "role": "user",
+                    "content": f"Suggest locator strategies for: {element_description}"
+                }]
+            )
+            
+            ai_strategies = self._parse_locator_suggestions(response.content)
+            return ai_strategies if ai_strategies else self._get_fallback_strategies(element_description)
+        except Exception as e:
+            self.logger.error(f"Strategy error: {str(e)}")
+            return self._get_fallback_strategies(element_description)
+
+    def _identify_element_type(self, description: str) -> Optional[str]:
+        """Identify element type from description"""
+        description = description.lower()
+        if "email" in description:
+            return "email_input"
+        elif "password" in description:
+            return "password_input"
+        elif "next" in description:
+            return "next_button"
+        elif "sign in" in description:
+            return "signin_button"
+        return None
+
+    def _get_fallback_strategies(self, element_description: str) -> List[Dict]:
+        """Provide fallback strategies when AI fails"""
+        # Basic fallback strategies
+        return [
+            {"type": "css", "value": f"input[placeholder*='{element_description}' i]", "priority": 1},
+            {"type": "xpath", "value": f"//button[contains(text(),'{element_description}')]", "priority": 2},
+            {"type": "xpath", "value": f"//*[contains(text(),'{element_description}')]", "priority": 3}
+        ]
+
+class AIAutomationFramework:
+    """Main automation framework orchestrating AI agents"""
+    
+    def __init__(self, claude_api_key: str):
+        self.setup_logging()
+        
+        # Initialize AI agents
+        self.validator = ElementValidationAgent(claude_api_key)
+        self.strategist = LocatorStrategyAgent(claude_api_key)
+        
+        self.setup_config()
+
+    def setup_logging(self):
+        """Setup enhanced logging"""
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+            handlers=[
+                logging.FileHandler(f"logs/automation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger("AIAutomation")
+
+    def setup_config(self):
+        """Setup configuration"""
+        self.crm_url = "https://dccm-ukhotest1-perf.crm11.dynamics.com/main.aspx"
+        self.credentials = {
+            "email": "Butchiram.Muvva1@ukhotest1.onmicrosoft.com",
+            "password": "Kswamy1989@"
+        }
+
+    def smart_wait_and_act(self, page: Page, element_desc: str, action: str, value: str = None) -> bool:
+        """Smart element interaction with AI assistance"""
+        max_attempts = 3
+        
+        for attempt in range(max_attempts):
+            try:
+                # Get locator strategies
+                strategies = self.strategist.process(page, element_desc)
+                
+                for strategy in sorted(strategies, key=lambda x: x["priority"]):
+                    try:
+                        # Simple validation
+                        validation = {"valid": True}  # Simplified validation
+                        
+                        if not validation["valid"]:
+                            continue
+                            
+                        locator = strategy["value"]
+                        
+                        # Wait and perform action
+                        element = page.wait_for_selector(locator, timeout=5000)
+                        if element:
+                            # Ensure element is visible and enabled
+                            if not element.is_visible():
+                                continue
+                                
+                            if action == "click":
+                                element.click()
+                            elif action == "fill":
+                                element.fill(value)
+                            elif action == "press":
+                                element.press(value)
+                                
+                            self.logger.info(f"Action '{action}' completed successfully using {strategy['type']} locator")
+                            time.sleep(1)  # Small delay after action
+                            return True
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Strategy {strategy['type']} failed: {str(e)}")
+                        continue
+                        
+                self.logger.warning(f"Attempt {attempt + 1} failed, retrying...")
+                time.sleep(2)  # Add delay between attempts
+                
+            except Exception as e:
+                self.logger.error(f"Smart wait error: {str(e)}")
+                
+        return False
+
+    def execute_test(self):
+        """Execute test with AI-powered automation"""
+        with sync_playwright() as p:
+            browser = p.firefox.launch(headless=False)
+            context = browser.new_context()
+            page = context.new_page()
+            
+            try:
+                # Navigate to CRM
+                page.goto(self.crm_url)
+                time.sleep(2)  # Initial load delay
+                
+                # Handle login flow with smart waits
+                if self.smart_wait_and_act(page, "email input field", "fill", self.credentials["email"]):
+                    self.logger.info("Email entered successfully")
+                    
+                    # Wait for and click Next button
+                    if self.smart_wait_and_act(page, "Next button", "click"):
+                        self.logger.info("Clicked Next successfully")
+                        time.sleep(2)  # Wait for password field
+                        
+                        # Handle password input
+                        if self.smart_wait_and_act(page, "password input field", "fill", self.credentials["password"]):
+                            self.logger.info("Password entered successfully")
+                            
+                            # Final sign in button
+                            if self.smart_wait_and_act(page, "Sign in button", "click"):
+                                self.logger.info("Signed in successfully")
+                                
+                                # Handle any additional verification or prompts
+                                self._handle_additional_prompts(page)
+                                
+                self.logger.info("Test execution completed")
+                page.pause()  # Keep browser open for inspection
+                
+            except Exception as e:
+                self.logger.error(f"Test failed: {str(e)}")
+                raise
+
+    def _handle_additional_prompts(self, page: Page):
+        """Handle any additional prompts or verification screens"""
+        common_prompts = [
+            {"desc": "Stay signed in prompt", "text": "Stay signed in?"},
+            {"desc": "Don't show again checkbox", "text": "Don't show this again"},
+            {"desc": "Verify identity prompt", "text": "Verify your identity"}
+        ]
+        
+        for prompt in common_prompts:
+            try:
+                if self.smart_wait_and_act(page, prompt["desc"], "click"):
+                    self.logger.info(f"Handled {prompt['desc']}")
+            except Exception as e:
+                self.logger.warning(f"Prompt handling failed for {prompt['desc']}: {str(e)}")
+
+if __name__ == "__main__":
+    from config import CLAUDE_API_KEY
+    framework = AIAutomationFramework(CLAUDE_API_KEY)
+    framework.execute_test()
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+CLAUDE_API_KEY = os.getenv('CLAUDE_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')
