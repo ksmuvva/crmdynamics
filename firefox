@@ -1,0 +1,167 @@
+from playwright.sync_api import sync_playwright, expect, TimeoutError
+import time
+
+
+def wait_for_page_stabilization(page, timeout=60000):
+    """Wait for page to stabilize by checking multiple conditions"""
+    try:
+        # Wait for network to be idle
+        page.wait_for_load_state("networkidle", timeout=timeout)
+        # Wait for any animations to complete
+        page.wait_for_function("""
+            () => {
+                const animations = document.getAnimations();
+                return animations.length === 0 || animations.every(a => a.playState === 'finished');
+            }
+        """, timeout=timeout)
+        # Check if page is not loading
+        page.wait_for_function("""
+            () => !document.querySelector('.progress-indicator') && 
+                  !document.querySelector('[role="progressbar"]')
+        """, timeout=timeout)
+        return True
+    except TimeoutError:
+        print("Page stabilization timeout - continuing anyway...")
+        return False
+
+
+with sync_playwright() as p:
+    try:
+        # Launch browser with specific configurations
+        browser = p.firefox.launch(
+            headless=False,
+            args=['--start-maximized']
+        )
+
+        # Create a context with specific viewport
+        context = browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+        )
+
+        # Create a new page
+        page = context.new_page()
+
+        # Navigate to the Dynamics CRM URL
+        print("Navigating to Dynamics CRM...")
+        page.goto(
+            "https://dccm-ukhotest1-perf.crm11.dynamics.com/main.aspx?appid=e58b8e09-a776-ef11-a66f-6045bdfc3821&pagetype=entitylist&etn=sasa_custody_record&viewid=e423c3da-b8d1-4c54-ad8d-66d9ba562e2e&viewType=1039",
+            wait_until="networkidle",
+            timeout=60000)
+
+        # Handle login with explicit waits
+        print("Starting login process...")
+
+        # Wait for and fill email
+        print("Entering email...")
+        email_selector = 'input[type="email"]'
+        page.wait_for_selector(email_selector, state='visible', timeout=60000)
+        page.fill(email_selector, 'Butchiram.Muvva1@ukhotest1.onmicrosoft.com')
+        print("Email entered")
+        page.wait_for_timeout(2000)  # Small delay after email entry
+
+        # Click the Next/Submit button
+        submit_button = 'input[type="submit"]'
+        page.wait_for_selector(submit_button, state='visible', timeout=30000)
+        page.click(submit_button)
+        print("Clicked Next after email")
+
+        # Wait for and fill password
+        print("Entering password...")
+        password_selector = 'input[name="passwd"]'
+        page.wait_for_selector(password_selector, state='visible', timeout=30000)
+        page.fill(password_selector, 'Kswamy1989@')
+        print("Password entered")
+        page.wait_for_timeout(2000)  # Small delay after password entry
+
+        # Click the Sign in button
+        sign_in_button = 'input[value="Sign in"]'
+        page.wait_for_selector(sign_in_button, state='visible', timeout=30000)
+        page.click(sign_in_button)
+        print("Clicked Sign in button")
+
+        # Handle 'Stay signed in' prompt
+        try:
+            stay_signed_in_button = '#idSIButton9'
+            page.wait_for_selector(stay_signed_in_button, state='visible', timeout=15000)
+            page.click(stay_signed_in_button)
+            print("Handled 'Stay signed in' prompt")
+        except TimeoutError:
+            print("No 'Stay signed in' prompt found, continuing...")
+
+        # Wait for main page load after login
+        print("Waiting for main page to load...")
+        page.wait_for_load_state("domcontentloaded", timeout=60000)
+        page.wait_for_load_state("networkidle", timeout=60000)
+        print("Main page loaded")
+
+        # Additional wait for Dynamics interface
+        print("Waiting for Dynamics interface...")
+        try:
+            page.wait_for_selector('div[role="main"]', timeout=30000)
+            print("Dynamics interface loaded")
+        except TimeoutError:
+            print("Timeout waiting for Dynamics interface, but continuing...")
+
+        # Wait for loading spinner to disappear
+        try:
+            page.wait_for_function("""
+                () => !document.querySelector('.loadingbar') && 
+                      !document.querySelector('.progress-indicator')
+            """, timeout=30000)
+        except TimeoutError:
+            print("Loading indicators still present, but continuing...")
+
+        # Additional wait for dynamic content
+        page.wait_for_timeout(10000)
+        print("Additional wait completed")
+
+        # Click Home button
+        print("Attempting to click Home button...")
+        home_xpath = "//span[normalize-space()='Home']"
+        max_retries = 3
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                page.wait_for_selector(f"xpath={home_xpath}", state='visible', timeout=30000)
+                page.click(f"xpath={home_xpath}")
+                print("Successfully clicked Home button")
+                break
+            except Exception as e:
+                retry_count += 1
+                print(f"Retry {retry_count}/{max_retries} for Home button...")
+                page.wait_for_timeout(5000)
+                if retry_count == max_retries:
+                    raise Exception("Failed to click Home button after multiple retries")
+
+        # Wait after clicking home
+        wait_for_page_stabilization(page)
+
+        # Click New button
+        print("Attempting to click New button...")
+        new_xpath = "//span[contains(text(),'New')]"
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                page.wait_for_selector(f"xpath={new_xpath}", state='visible', timeout=30000)
+                page.click(f"xpath={new_xpath}")
+                print("Successfully clicked New button")
+                break
+            except Exception as e:
+                retry_count += 1
+                print(f"Retry {retry_count}/{max_retries} for New button...")
+                page.wait_for_timeout(5000)
+                if retry_count == max_retries:
+                    raise Exception("Failed to click New button after multiple retries")
+
+        # Final wait for form load
+        wait_for_page_stabilization(page)
+        print("Script completed successfully")
+
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        # Take screenshot on error
+        timestamp = int(time.time())
+        page.screenshot(path=f"error_screenshot_{timestamp}.png")
+        raise e
